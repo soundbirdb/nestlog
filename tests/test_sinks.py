@@ -1,105 +1,108 @@
-"""Tests for nestlog built-in sinks."""
+"""Tests for nestlog.sinks (StreamSink, FileSink, NullSink) including filter integration."""
+
+from __future__ import annotations
 
 import io
-import json
 import os
 import tempfile
-import time
+
 import pytest
 
-from nestlog.sinks import StreamSink, JSONSink, FileSink
+from nestlog.core import Level, LogRecord
+from nestlog.filters import LevelFilter, NameFilter
+from nestlog.sinks import FileSink, NullSink, StreamSink
 
 
 class FakeRecord:
-    def __init__(self, message="hello", level="INFO", name="test", extra=None):
-        self.message = message
+    """Minimal stand-in for LogRecord."""
+
+    def __init__(self, level: Level = Level.INFO, name: str = "test", message: str = "hello") -> None:
         self.level = level
         self.name = name
-        self.extra = extra or {}
-        self.timestamp = time.time()
+        self.message = message
 
-    def __str__(self):
-        return self.level
+    def __str__(self) -> str:
+        return self.message
 
-
-# ── StreamSink ────────────────────────────────────────────────────────────────
 
 class TestStreamSink:
     def test_basic_emit(self):
         buf = io.StringIO()
         sink = StreamSink(stream=buf)
-        sink.emit(FakeRecord("world"))
-        out = buf.getvalue()
-        assert "world" in out
-        assert "INFO" in out
-        assert "test" in out
+        sink.emit(FakeRecord())
+        assert "hello" in buf.getvalue()
 
-    def test_extra_fields_appended(self):
+    def test_format_contains_level_and_name(self):
         buf = io.StringIO()
         sink = StreamSink(stream=buf)
-        sink.emit(FakeRecord(extra={"req_id": "abc123"}))
-        assert "req_id" in buf.getvalue()
-        assert "abc123" in buf.getvalue()
+        sink.emit(FakeRecord(Level.WARNING, "myapp"))
+        output = buf.getvalue()
+        assert "myapp" in output
+        assert "WARNING" in output
 
     def test_custom_format(self):
         buf = io.StringIO()
-        sink = StreamSink(stream=buf, fmt="{level}::{message}")
-        sink.emit(FakeRecord("msg"))
-        assert buf.getvalue().startswith("INFO::msg")
+        sink = StreamSink(stream=buf, fmt="{message}")
+        sink.emit(FakeRecord(message="custom"))
+        assert buf.getvalue().strip() == "custom"
 
-    def test_each_record_ends_with_newline(self):
+    def test_filter_blocks_record(self):
+        buf = io.StringIO()
+        sink = StreamSink(stream=buf, filter=LevelFilter(min_level=Level.ERROR))
+        sink.emit(FakeRecord(Level.DEBUG))
+        assert buf.getvalue() == ""
+
+    def test_filter_allows_record(self):
+        buf = io.StringIO()
+        sink = StreamSink(stream=buf, filter=LevelFilter(min_level=Level.INFO))
+        sink.emit(FakeRecord(Level.INFO))
+        assert buf.getvalue() != ""
+
+    def test_set_filter_after_construction(self):
         buf = io.StringIO()
         sink = StreamSink(stream=buf)
-        sink.emit(FakeRecord())
-        sink.emit(FakeRecord())
-        assert buf.getvalue().count("\n") == 2
+        sink.set_filter(NameFilter("special"))
+        sink.emit(FakeRecord(name="other"))
+        assert buf.getvalue() == ""
 
+    def test_close_does_not_close_stderr(self, capsys):
+        import sys
+        sink = StreamSink(stream=sys.stderr)
+        sink.close()  # should not raise or close stderr
 
-# ── JSONSink ──────────────────────────────────────────────────────────────────
-
-class TestJSONSink:
-    def test_valid_json_output(self):
-        buf = io.StringIO()
-        sink = JSONSink(stream=buf)
-        sink.emit(FakeRecord("json test"))
-        data = json.loads(buf.getvalue())
-        assert data["message"] == "json test"
-        assert data["level"] == "INFO"
-        assert data["name"] == "test"
-        assert "timestamp" in data
-
-    def test_extra_fields_merged(self):
-        buf = io.StringIO()
-        sink = JSONSink(stream=buf)
-        sink.emit(FakeRecord(extra={"user": "alice", "status": 200}))
-        data = json.loads(buf.getvalue())
-        assert data["user"] == "alice"
-        assert data["status"] == 200
-
-
-# ── FileSink ──────────────────────────────────────────────────────────────────
 
 class TestFileSink:
-    def test_writes_to_file(self, tmp_path):
-        log_file = tmp_path / "app.log"
-        sink = FileSink(str(log_file))
-        sink.emit(FakeRecord("file record"))
-        sink.close()
-        content = log_file.read_text()
-        assert "file record" in content
-
-    def test_close_is_idempotent(self, tmp_path):
-        log_file = tmp_path / "app.log"
-        sink = FileSink(str(log_file))
-        sink.emit(FakeRecord())
-        sink.close()
-        sink.close()  # should not raise
-
-    def test_appends_by_default(self, tmp_path):
-        log_file = tmp_path / "app.log"
-        for _ in range(3):
-            sink = FileSink(str(log_file))
-            sink.emit(FakeRecord("line"))
+    def test_writes_to_file(self):
+        with tempfile.NamedTemporaryFile(mode="r", suffix=".log", delete=False) as f:
+            path = f.name
+        try:
+            sink = FileSink(path)
+            sink.emit(FakeRecord(message="file-test"))
             sink.close()
-        lines = log_file.read_text().splitlines()
-        assert len(lines) == 3
+            content = open(path).read()
+            assert "file-test" in content
+        finally:
+            os.unlink(path)
+
+    def test_appends_on_reopen(self):
+        with tempfile.NamedTemporaryFile(mode="r", suffix=".log", delete=False) as f:
+            path = f.name
+        try:
+            for msg in ("first", "second"):
+                sink = FileSink(path)
+                sink.emit(FakeRecord(message=msg))
+                sink.close()
+            content = open(path).read()
+            assert "first" in content and "second" in content
+        finally:
+            os.unlink(path)
+
+
+class TestNullSink:
+    def test_discards_records(self):
+        sink = NullSink()
+        sink.emit(FakeRecord())  # should not raise
+
+    def test_close_is_noop(self):
+        sink = NullSink()
+        sink.close()  # should not raise

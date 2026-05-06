@@ -1,86 +1,87 @@
-"""Built-in sink implementations for nestlog."""
+"""Built-in sinks for nestlog."""
+
+from __future__ import annotations
 
 import sys
-import json
-import datetime
-from typing import TextIO
+from typing import IO, Optional
+
+from nestlog.core import LogRecord
+from nestlog.filters import BaseFilter
 
 
 class BaseSink:
-    """Abstract base class for all sinks."""
+    """Abstract base sink. All sinks must implement :meth:`emit`."""
 
-    def emit(self, record) -> None:
+    def __init__(self, filter: Optional[BaseFilter] = None) -> None:
+        self._filter: Optional[BaseFilter] = filter
+
+    def set_filter(self, filter: BaseFilter) -> None:
+        """Attach a filter to this sink."""
+        self._filter = filter
+
+    def _should_emit(self, record: LogRecord) -> bool:
+        if self._filter is None:
+            return True
+        return self._filter.allow(record)
+
+    def emit(self, record: LogRecord) -> None:  # noqa: D102
         raise NotImplementedError
 
     def close(self) -> None:
-        pass
+        """Release any resources held by the sink."""
 
 
 class StreamSink(BaseSink):
-    """Writes formatted log records to a text stream (stdout/stderr/file)."""
+    """Write formatted log records to a text stream."""
 
-    DEFAULT_FORMAT = "{time} [{level}] {name}: {message}"
+    DEFAULT_FMT = "{level} [{name}] {message}"
 
-    def __init__(self, stream: TextIO = None, fmt: str = None):
-        self.stream = stream or sys.stderr
-        self.fmt = fmt or self.DEFAULT_FORMAT
+    def __init__(
+        self,
+        stream: IO[str] = sys.stderr,
+        fmt: str = DEFAULT_FMT,
+        filter: Optional[BaseFilter] = None,
+    ) -> None:
+        super().__init__(filter=filter)
+        self._stream = stream
+        self._fmt = fmt
 
-    def emit(self, record) -> None:
-        time_str = datetime.datetime.fromtimestamp(
-            record.timestamp, tz=datetime.timezone.utc
-        ).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
-        line = self.fmt.format(
-            time=time_str,
-            level=str(record.level),
+    def emit(self, record: LogRecord) -> None:
+        if not self._should_emit(record):
+            return
+        line = self._fmt.format(
+            level=record.level,
             name=record.name,
-            message=record.message,
+            message=str(record),
         )
-        if record.extra:
-            extras = " ".join(f"{k}={v!r}" for k, v in record.extra.items())
-            line = f"{line} | {extras}"
-        self.stream.write(line + "\n")
-        self.stream.flush()
+        self._stream.write(line + "\n")
+        self._stream.flush()
 
-
-class JSONSink(BaseSink):
-    """Writes log records as newline-delimited JSON to a stream."""
-
-    def __init__(self, stream: TextIO = None):
-        self.stream = stream or sys.stdout
-
-    def emit(self, record) -> None:
-        payload = {
-            "timestamp": record.timestamp,
-            "level": str(record.level),
-            "name": record.name,
-            "message": record.message,
-        }
-        if record.extra:
-            payload.update(record.extra)
-        self.stream.write(json.dumps(payload) + "\n")
-        self.stream.flush()
+    def close(self) -> None:
+        if self._stream not in (sys.stdout, sys.stderr):
+            self._stream.close()
 
 
 class FileSink(StreamSink):
-    """Writes formatted log records to a file, opening it on first emit."""
+    """Convenience sink that opens *path* for appending."""
 
-    def __init__(self, path: str, fmt: str = None, mode: str = "a", encoding: str = "utf-8"):
-        self.path = path
-        self.mode = mode
-        self.encoding = encoding
-        self._file: TextIO | None = None
-        super().__init__(stream=None, fmt=fmt)
-
-    def _ensure_open(self) -> None:
-        if self._file is None:
-            self._file = open(self.path, self.mode, encoding=self.encoding)
-            self.stream = self._file
-
-    def emit(self, record) -> None:
-        self._ensure_open()
-        super().emit(record)
+    def __init__(
+        self,
+        path: str,
+        fmt: str = StreamSink.DEFAULT_FMT,
+        encoding: str = "utf-8",
+        filter: Optional[BaseFilter] = None,
+    ) -> None:
+        self._path = path
+        stream = open(path, "a", encoding=encoding)  # noqa: WPS515
+        super().__init__(stream=stream, fmt=fmt, filter=filter)
 
     def close(self) -> None:
-        if self._file is not None:
-            self._file.close()
-            self._file = None
+        self._stream.close()
+
+
+class NullSink(BaseSink):
+    """Silently discard every record (useful for testing)."""
+
+    def emit(self, record: LogRecord) -> None:
+        pass
