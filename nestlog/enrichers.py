@@ -1,16 +1,21 @@
-"""Enrichers automatically attach extra fields to log records before emission."""
+"""Built-in enrichers for nestlog.
 
-import os
-import socket
-import threading
-from typing import Any, Callable, Dict
+Enrichers add or merge extra fields into a LogRecord before it reaches
+a sink.  Chain multiple enrichers with the ``+`` operator.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Dict
+
+from .core import LogRecord
+from . import context as _ctx
 
 
 class BaseEnricher:
-    """Base class for all enrichers."""
+    """Abstract base class for enrichers."""
 
-    def enrich(self, fields: Dict[str, Any]) -> Dict[str, Any]:
-        """Return a (possibly modified) copy of *fields* with extra data added."""
+    def enrich(self, record: LogRecord) -> LogRecord:
         raise NotImplementedError
 
     def __add__(self, other: "BaseEnricher") -> "ChainedEnricher":
@@ -24,52 +29,65 @@ class ChainedEnricher(BaseEnricher):
         self._first = first
         self._second = second
 
-    def enrich(self, fields: Dict[str, Any]) -> Dict[str, Any]:
-        return self._second.enrich(self._first.enrich(fields))
+    def enrich(self, record: LogRecord) -> LogRecord:
+        return self._second.enrich(self._first.enrich(record))
 
 
 class StaticEnricher(BaseEnricher):
-    """Attaches a fixed set of key/value pairs to every record."""
+    """Merges a fixed set of fields into every record.
 
-    def __init__(self, **kwargs: Any) -> None:
-        self._extra = kwargs
+    Fields already present on the record take precedence.
+    """
 
-    def enrich(self, fields: Dict[str, Any]) -> Dict[str, Any]:
-        merged = dict(self._extra)
-        merged.update(fields)  # record-level fields win
-        return merged
+    def __init__(self, **fields: Any) -> None:
+        self._fields: Dict[str, Any] = fields
 
-
-class HostnameEnricher(BaseEnricher):
-    """Attaches the current machine hostname under the key ``hostname``."""
-
-    def __init__(self) -> None:
-        self._hostname = socket.gethostname()
-
-    def enrich(self, fields: Dict[str, Any]) -> Dict[str, Any]:
-        out = dict(fields)
-        out.setdefault("hostname", self._hostname)
-        return out
+    def enrich(self, record: LogRecord) -> LogRecord:
+        merged = {**self._fields, **record.fields}
+        return LogRecord(
+            level=record.level,
+            message=record.message,
+            fields=merged,
+        )
 
 
-class ProcessEnricher(BaseEnricher):
-    """Attaches ``pid`` and ``thread_id`` to every record."""
+class ContextEnricher(BaseEnricher):
+    """Merges the current thread-local context into every record.
 
-    def enrich(self, fields: Dict[str, Any]) -> Dict[str, Any]:
-        out = dict(fields)
-        out.setdefault("pid", os.getpid())
-        out.setdefault("thread_id", threading.get_ident())
-        return out
+    Fields already present on the record take precedence over context
+    fields, which in turn take precedence over nothing.
+
+    Example::
+
+        from nestlog.context import bind
+        from nestlog.enrichers import ContextEnricher
+
+        logger.add_enricher(ContextEnricher())
+        with bind(user_id=42):
+            logger.info("hello")  # record will contain user_id=42
+    """
+
+    def enrich(self, record: LogRecord) -> LogRecord:
+        ctx = _ctx.current_fields()
+        if not ctx:
+            return record
+        merged = {**ctx, **record.fields}
+        return LogRecord(
+            level=record.level,
+            message=record.message,
+            fields=merged,
+        )
 
 
 class CallableEnricher(BaseEnricher):
-    """Delegates enrichment to an arbitrary callable.
+    """Wraps an arbitrary callable as an enricher.
 
-    The callable receives the current *fields* dict and must return a dict.
+    The callable receives the current :class:`LogRecord` and must return
+    a (possibly new) :class:`LogRecord`.
     """
 
-    def __init__(self, fn: Callable[[Dict[str, Any]], Dict[str, Any]]) -> None:
+    def __init__(self, fn) -> None:
         self._fn = fn
 
-    def enrich(self, fields: Dict[str, Any]) -> Dict[str, Any]:
-        return self._fn(dict(fields))
+    def enrich(self, record: LogRecord) -> LogRecord:
+        return self._fn(record)
