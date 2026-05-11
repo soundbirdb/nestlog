@@ -1,4 +1,17 @@
-"""nestlog — Lightweight structured logging library for Python."""
+"""nestlog — Lightweight structured logging library for Python.
+
+Public API
+----------
+This module re-exports every symbol that forms the stable public surface of
+nestlog so that callers only need a single import::
+
+    import nestlog as nl
+
+    logger = nl.Logger()
+    logger.info("hello", user="alice")
+
+See the individual sub-modules for full documentation.
+"""
 
 from nestlog.core import Level, LogRecord, Logger
 from nestlog.sinks import BaseSink, StreamSink, NullSink
@@ -16,6 +29,8 @@ from nestlog.throttle import ThrottleProcessor
 from nestlog.deduplicator import DeduplicatorProcessor
 from nestlog.buffering import BufferingProcessor
 from nestlog.pipeline import Pipeline
+
+__version__ = "0.1.0"
 
 __all__ = [
     # core
@@ -46,4 +61,6 @@ __all__ = [
     "ThrottleProcessor", "DeduplicatorProcessor", "BufferingProcessor",
     # pipeline
     "Pipeline",
+    # version
+    "__version__",
 ]
